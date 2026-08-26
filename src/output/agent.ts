@@ -121,19 +121,41 @@ function project(
   return build(section.data as UnknownRecord);
 }
 
+/** Local hours sampled for the intraday arc: early, morning, midday, afternoon, evening, night. */
+const ARC_HOURS = [6, 9, 12, 15, 18, 21];
+
 function weather(data: UnknownRecord): unknown {
   const current = (data.current ?? {}) as UnknownRecord;
   const today = (data.today ?? {}) as UnknownRecord;
+  const tomorrow = (data.tomorrow ?? null) as UnknownRecord | null;
   const units = (data.units ?? {}) as UnknownRecord;
   const degrees = String(units.temperature ?? "");
   const rain = asArray(today.precipitationPeriods);
+
+  const hours = asArray(today.hours)
+    .filter((hour) => ARC_HOURS.includes(Number(String(hour.time ?? "").slice(11, 13))))
+    .map((hour) => ({
+      at: String(hour.time ?? "").slice(11, 16),
+      temp: `${hour.temperature}${degrees}`,
+      condition: hour.condition,
+    }));
+
   return {
     location: (data.location as UnknownRecord)?.name ?? null,
     now:
       `${current.temperature}${degrees}, ${current.condition}, feels like ${current.apparentTemperature}${degrees}`,
     today:
       `high ${today.maximumTemperature}${degrees}, low ${today.minimumTemperature}${degrees}, ${today.condition}, ${today.precipitationProbabilityPercent}% chance of rain`,
-    rainPeriods: rain.length > 0 ? rain : undefined,
+    hours,
+    tomorrow: tomorrow
+      ? `high ${tomorrow.maximumTemperature}${degrees}, low ${tomorrow.minimumTemperature}${degrees}, ${tomorrow.condition}, ${tomorrow.precipitationProbabilityPercent}% chance of rain`
+      : undefined,
+    rainPeriods: rain.length > 0
+      ? rain.map((period) => ({
+        at: String(period.time ?? "").slice(11, 16),
+        chance: `${period.probabilityPercent}%`,
+      }))
+      : undefined,
     sunrise: clockTime(today.sunrise),
     sunset: clockTime(today.sunset),
   };

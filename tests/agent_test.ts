@@ -268,3 +268,56 @@ Deno.test("renderAgentBrief only reports metric changes that moved", () => {
 
 // Keeps the DaybreakConfig import meaningful for type-level regressions.
 const _filtersAreConfigShaped: DaybreakConfig["filters"] = NO_FILTERS;
+
+Deno.test("renderAgentBrief samples the intraday arc and reports tomorrow", () => {
+  const hours = Array.from({ length: 24 }, (_unused, hour) => ({
+    time: `2026-08-25T${String(hour).padStart(2, "0")}:00`,
+    temperature: 10 + hour,
+    weatherCode: 0,
+    condition: "clear sky",
+    precipitationProbabilityPercent: 0,
+  }));
+  const brief = renderAgentBrief(
+    output({
+      weather: section({
+        location: { name: "Toronto" },
+        units: { temperature: "°C" },
+        current: { temperature: 17, apparentTemperature: 18, condition: "clear sky" },
+        today: {
+          maximumTemperature: 25,
+          minimumTemperature: 15,
+          condition: "partly cloudy",
+          precipitationProbabilityPercent: 10,
+          sunrise: "2026-08-25T06:34",
+          sunset: "2026-08-25T20:03",
+          precipitationPeriods: [],
+          hours,
+        },
+        tomorrow: {
+          maximumTemperature: 28,
+          minimumTemperature: 18,
+          condition: "rain showers",
+          precipitationProbabilityPercent: 55,
+        },
+      }),
+    }),
+    NO_FILTERS,
+  );
+
+  const weather = brief.weather as {
+    hours: Array<{ at: string; temp: string }>;
+    tomorrow: string;
+    sunset: string;
+  };
+  assertEquals(weather.hours.map((hour) => hour.at), [
+    "06:00",
+    "09:00",
+    "12:00",
+    "15:00",
+    "18:00",
+    "21:00",
+  ]);
+  assertEquals(weather.hours[3].temp, "25°C");
+  assertEquals(weather.tomorrow, "high 28°C, low 18°C, rain showers, 55% chance of rain");
+  assertEquals(weather.sunset, "20:03");
+});

@@ -225,6 +225,9 @@ over deep JSON, so it does the judging up front:
 - **Filters and deduplication are applied**, and the counts of what was removed are reported so the
   narrator can say "the rest was newsletters" truthfully without being handed the newsletters.
 - **Section health** is summarised under `health.collected` and `health.problems`.
+- **Weather carries an intraday arc**, sampled at 06:00, 09:00, 12:00, 15:00, 18:00 and 21:00 local
+  time, plus tomorrow's outlook, so the narrator can describe the shape of the day rather than only
+  its high and low.
 
 The projection is lossy by design. Use the default format when you need the complete record.
 

@@ -30,14 +30,21 @@ function renderWeather(section: SectionResult<unknown>): string {
   const data = section.data as UnknownRecord;
   const current = data.current as UnknownRecord;
   const today = data.today as UnknownRecord;
+  const tomorrow = data.tomorrow as UnknownRecord | null;
   const units = data.units as UnknownRecord;
-  return [
+  const lines = [
     SECTION_TITLES.WEATHER,
     `${
       data.location && (data.location as UnknownRecord).name
     }: ${current.temperature}${units.temperature}, ${current.condition}. Feels like ${current.apparentTemperature}${units.temperature}.`,
     `High ${today.maximumTemperature}${units.temperature}, low ${today.minimumTemperature}${units.temperature}. Rain chance ${today.precipitationProbabilityPercent}%.`,
-  ].join("\n");
+  ];
+  if (tomorrow) {
+    lines.push(
+      `Tomorrow: ${tomorrow.condition}, high ${tomorrow.maximumTemperature}${units.temperature}, rain chance ${tomorrow.precipitationProbabilityPercent}%.`,
+    );
+  }
+  return lines.join("\n");
 }
 
 function renderCalendar(section: SectionResult<unknown>): string {
