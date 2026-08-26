@@ -3,55 +3,114 @@ import type { BriefOutput, SectionResult } from "../types.ts";
 import { partitionTodos, selectMail, type UnknownRecord } from "./select.ts";
 
 /**
- * A compact projection of BriefOutput intended for a language model to narrate.
+ * A compact, flat projection of BriefOutput for a language model to narrate.
  *
- * The `fetch` JSON is a faithful dump of every upstream API response and runs to hundreds of
- * kilobytes, most of it avatar URLs, project descriptions and long-tail backlog items. This
- * projection keeps the decisions and drops the decoration, and reports what it dropped so the
- * narrator can say "the rest was newsletters" without being handed the newsletters.
+ * The `json` format is a faithful dump of every upstream response and runs to roughly 180 KB.
+ * This projection is built for the opposite constraint: a small, locally hosted model with a
+ * short context window that reasons poorly over deep JSON. So the shape is deliberately dull.
+ *
+ * - One flat `work` array instead of five nested per-project buckets.
+ * - Ranking already applied, so the model narrates the given order instead of judging urgency.
+ * - Every reason pre-phrased in English, so no reason code has to be interpreted.
+ * - Hard item caps with explicit "+N more" counts, so a busy day cannot blow the window.
  */
 export interface AgentBrief {
   date: string;
   weekday: string;
   timezone: string;
   weekend: boolean;
-  sections: Record<string, string>;
-  problems: string[];
+  health: { collected: string[]; problems: string[] };
   weather?: unknown;
   calendar?: unknown;
   mail?: unknown;
-  github?: unknown;
-  gitlab?: unknown;
+  work: WorkItem[];
+  workOmitted: number;
+  metrics: unknown[];
+  recap?: unknown;
 }
 
-const WEEKDAY = new Intl.DateTimeFormat("en-CA", { weekday: "long", timeZone: "UTC" });
+export interface WorkItem {
+  priority: 1 | 2 | 3;
+  source: "gitlab" | "github";
+  kind: string;
+  ref: string;
+  title: string;
+  url: string;
+  why: string;
+}
 
-export function renderAgentBrief(output: BriefOutput, filters: BriefFilters): AgentBrief {
+/** Reason codes, in the order they should read, mapped to plain English. */
+const REASON_TEXT: Record<string, string> = {
+  pipeline_failed: "pipeline failed",
+  checks_failed: "checks failed",
+  merge_conflict: "merge conflict",
+  changes_requested: "changes requested",
+  merge_blocked: "merge blocked",
+  overdue: "overdue",
+  unresolved_discussions: "unresolved threads",
+  review_requested: "review requested",
+  assigned: "assigned to you",
+  ready_to_merge: "approved and ready to merge",
+};
+
+/** Anything here means the item is blocked or failing rather than merely waiting. */
+const BLOCKING = new Set([
+  "pipeline_failed",
+  "checks_failed",
+  "merge_conflict",
+  "changes_requested",
+  "merge_blocked",
+  "overdue",
+]);
+
+const WEEKDAY = new Intl.DateTimeFormat("en-CA", { weekday: "long", timeZone: "UTC" });
+const HOLIDAY_CALENDAR = /holiday|observance|birthday/i;
+
+export interface AgentOptions {
+  /** Maximum entries per list before a "+N more" count replaces the tail. */
+  maxItems: number;
+}
+
+export function renderAgentBrief(
+  output: BriefOutput,
+  filters: BriefFilters,
+  options: AgentOptions = { maxItems: 15 },
+): AgentBrief {
   const timezone = output.run.timezone;
   const date = output.run.reportingDate;
   const weekday = WEEKDAY.format(new Date(`${date}T12:00:00Z`));
-  const brief: AgentBrief = {
+  const collected: string[] = [];
+  const problems: string[] = [];
+
+  for (const name of ["weather", "mail", "calendar", "github", "gitlab"] as const) {
+    const section = output[name];
+    if (section.status === "ok" || section.status === "partial") collected.push(name);
+    if (section.error) problems.push(`${name}: ${section.error.message}`);
+    for (const warning of section.warnings) problems.push(`${name}: ${warning}`);
+  }
+
+  const work = [
+    ...gitlabWork(output.gitlab, filters),
+    ...githubWork(output.github),
+  ].sort((a, b) => a.priority - b.priority || KIND_ORDER(a) - KIND_ORDER(b));
+
+  return {
     date,
     weekday,
     timezone,
     weekend: weekday === "Saturday" || weekday === "Sunday",
-    sections: {},
-    problems: [],
+    health: { collected, problems },
+    weather: project(output.weather, weather),
+    calendar: project(
+      output.calendar,
+      (data) => calendar(data, date, timezone, options.maxItems),
+    ),
+    mail: project(output.mail, (data) => mail(data, filters, options.maxItems)),
+    work: work.slice(0, options.maxItems),
+    workOmitted: Math.max(0, work.length - options.maxItems),
+    metrics: metrics(output.github),
+    recap: recap(output.gitlab, options.maxItems),
   };
-
-  for (const name of ["weather", "mail", "calendar", "github", "gitlab"] as const) {
-    const section = output[name];
-    brief.sections[name] = section.status;
-    if (section.error) brief.problems.push(`${name}: ${section.error.message}`);
-    for (const warning of section.warnings) brief.problems.push(`${name}: ${warning}`);
-  }
-
-  brief.weather = project(output.weather, (data) => weather(data));
-  brief.calendar = project(output.calendar, (data) => calendar(data, date, timezone));
-  brief.mail = project(output.mail, (data) => mail(data, filters));
-  brief.github = project(output.github, (data) => github(data));
-  brief.gitlab = project(output.gitlab, (data) => gitlab(data, filters));
-  return brief;
 }
 
 function project(
@@ -67,32 +126,29 @@ function weather(data: UnknownRecord): unknown {
   const today = (data.today ?? {}) as UnknownRecord;
   const units = (data.units ?? {}) as UnknownRecord;
   const degrees = String(units.temperature ?? "");
+  const rain = asArray(today.precipitationPeriods);
   return {
     location: (data.location as UnknownRecord)?.name ?? null,
-    now: {
-      temperature: `${current.temperature}${degrees}`,
-      feelsLike: `${current.apparentTemperature}${degrees}`,
-      condition: current.condition,
-      observedAt: current.observedAt,
-    },
-    today: {
-      high: `${today.maximumTemperature}${degrees}`,
-      low: `${today.minimumTemperature}${degrees}`,
-      condition: today.condition,
-      rainChancePercent: today.precipitationProbabilityPercent,
-      rainPeriods: today.precipitationPeriods ?? [],
-      sunrise: clockTime(today.sunrise),
-      sunset: clockTime(today.sunset),
-    },
+    now:
+      `${current.temperature}${degrees}, ${current.condition}, feels like ${current.apparentTemperature}${degrees}`,
+    today:
+      `high ${today.maximumTemperature}${degrees}, low ${today.minimumTemperature}${degrees}, ${today.condition}, ${today.precipitationProbabilityPercent}% chance of rain`,
+    rainPeriods: rain.length > 0 ? rain : undefined,
+    sunrise: clockTime(today.sunrise),
+    sunset: clockTime(today.sunset),
   };
 }
 
-const HOLIDAY_CALENDAR = /holiday|observance|birthday/i;
-
-function calendar(data: UnknownRecord, date: string, timezone: string): unknown {
-  const events = deduplicate((data.events as UnknownRecord[]) ?? []);
+function calendar(
+  data: UnknownRecord,
+  date: string,
+  timezone: string,
+  maxItems: number,
+): unknown {
+  const events = deduplicate(asArray(data.events));
   const tomorrow = addDays(date, 1);
-  const buckets: Record<string, UnknownRecord[]> = { today: [], tomorrow: [], later: [] };
+  const today: UnknownRecord[] = [];
+  const next: UnknownRecord[] = [];
   const observances: string[] = [];
 
   for (const event of events) {
@@ -104,196 +160,245 @@ function calendar(data: UnknownRecord, date: string, timezone: string): unknown 
       continue;
     }
     const entry: UnknownRecord = {
+      at: event.allDay === true ? "all day" : clockTime(event.start, timezone),
       title: event.title,
-      when: event.allDay === true ? "all day" : clockTime(event.start, timezone),
-      day,
     };
     if (event.location) entry.location = event.location;
     if (event.responseStatus && event.responseStatus !== "accepted") {
       entry.rsvp = event.responseStatus;
     }
-    if (Array.isArray(event.sources) && event.sources.length > 1) {
-      entry.duplicatedAcross = event.sources.length;
-    }
-    const bucket = day === date ? "today" : day === tomorrow ? "tomorrow" : "later";
-    buckets[bucket].push(entry);
+    if (day === date) today.push(entry);
+    else next.push({ ...entry, day });
   }
 
   return {
-    today: buckets.today,
-    tomorrow: buckets.tomorrow,
-    later: buckets.later,
-    observances: [...new Set(observances)],
+    today: today.slice(0, maxItems),
+    upcoming: next.slice(0, maxItems),
+    observances: [...new Set(observances)].slice(0, maxItems),
   };
 }
 
-function mail(data: UnknownRecord, filters: BriefFilters): unknown {
-  const accounts = (data.accounts as UnknownRecord[]) ?? [];
-  const messages = accounts.flatMap((account) => (account.messages as UnknownRecord[]) ?? []);
+function mail(data: UnknownRecord, filters: BriefFilters, maxItems: number): unknown {
+  const accounts = asArray(data.accounts);
+  const messages = accounts.flatMap((account) => asArray(account.messages));
   const { signal, dropped } = selectMail(messages, filters);
-  const addresses = Object.fromEntries(
-    accounts.map((account) => [String(account.id), account.address]),
-  );
+  const filtered = dropped.category + dropped.sender + dropped.duplicate + dropped.noSignal;
   return {
-    accounts: addresses,
-    unreadTotal: messages.filter((message) => message.unread === true).length,
-    receivedTotal: messages.length,
-    signal: signal.map((message) => {
+    received: messages.length,
+    unread: messages.filter((message) => message.unread === true).length,
+    filtered,
+    items: signal.slice(0, maxItems).map((message) => {
       const sender = (message.sender ?? {}) as UnknownRecord;
       const entry: UnknownRecord = {
         from: sender.name || sender.address,
         subject: message.subject,
-        account: message.account,
-        reason: message.reason,
-        receivedAt: message.receivedAt,
+        why: message.reason === "unread" ? "unread" : "may need a decision",
       };
-      if (message.duplicates > 1) entry.repeated = message.duplicates;
+      if (message.duplicates > 1) entry.why += `, arrived ${message.duplicates} times`;
       return entry;
     }),
-    dropped,
+    itemsOmitted: Math.max(0, signal.length - maxItems),
   };
 }
 
-function github(data: UnknownRecord): unknown {
-  const repositories = (data.repositories as UnknownRecord[]) ?? [];
-  const todos = (data.todos ?? {}) as UnknownRecord;
-  return {
-    repositories: repositories.map((repo) => ({
-      name: repo.name,
-      stars: metricPair(repo.stars),
-      downloads: metricPair(repo.releaseDownloads),
-      openIssues: repo.openIssues,
-    })),
-    actionable: [
-      ...workItems(todos.reviewRequests),
-      ...workItems(todos.assignedPullRequests),
-      ...workItems(todos.assignedIssues),
-      ...workItems(todos.authoredPullRequests),
-    ].filter((item) => item.actionReasons.length > 0),
-    openAuthoredIssues: countOf(todos.authoredIssues),
-    notifications: (asArray(todos.notifications)).map((item) => ({
-      repository: (item.repository as UnknownRecord)?.full_name,
-      reason: item.reason,
-      type: (item.subject as UnknownRecord)?.type,
-      title: (item.subject as UnknownRecord)?.title,
-      updatedAt: item.updated_at,
-    })),
-  };
-}
+function gitlabWork(section: SectionResult<unknown>, filters: BriefFilters): WorkItem[] {
+  if (!section.data) return [];
+  const data = section.data as UnknownRecord;
+  const items: WorkItem[] = [];
+  const seen = new Set<string>();
+  const seenUrls = new Set<string>();
 
-function gitlab(data: UnknownRecord, filters: BriefFilters): unknown {
-  const { kept, ignored } = partitionTodos((data.todos as UnknownRecord[]) ?? [], filters);
-  const projects = (data.projects as UnknownRecord[]) ?? [];
-  return {
-    todos: kept.map((todo) => {
-      const target = (todo.target ?? {}) as UnknownRecord;
-      const author = (todo.author ?? {}) as UnknownRecord;
-      return {
-        action: todo.action_name,
-        title: target.title ?? todo.body,
-        url: todo.target_url,
-        author: author.username,
-        project: (todo.project as UnknownRecord)?.path_with_namespace,
-        updatedAt: todo.updated_at,
-      };
-    }),
-    todosIgnored: ignored,
-    projects: projects.map((project) => ({
-      path: project.path,
-      stars: metricPair((project.metrics as UnknownRecord)?.stars),
-      reviewRequests: mergeRequests(project.reviewRequests),
-      // Authored and assigned overlap almost entirely; one list keeps the brief honest.
-      myMergeRequests: mergeRequests([
-        ...asArray(project.authoredMergeRequests),
-        ...asArray(project.assignedMergeRequests),
-      ]),
-      // Every assigned issue is flagged actionRequired upstream, which makes the whole
-      // backlog look urgent. Only dated work earns a line; the rest is a count.
-      assignedIssues: asArray(project.assignedIssues)
-        .filter((issue) => issue.overdue === true || issue.dueDate)
-        .map((issue) => ({
-          reference: issue.reference,
-          title: issue.title,
-          url: issue.url,
-          dueDate: issue.dueDate,
-          overdue: issue.overdue,
-        })),
-      assignedIssuesTotal: countOf(project.assignedIssues),
-      authoredIssuesTotal: countOf(project.authoredIssues),
-      recap: project.recap,
-    })),
-  };
-}
-
-function mergeRequests(value: unknown) {
-  const byReference = new Map<string, UnknownRecord>();
-  for (const mr of asArray(value)) {
-    const pipeline = (mr.pipeline ?? null) as UnknownRecord | null;
-    const approvals = (mr.approvals ?? null) as UnknownRecord | null;
-    const reference = String(mr.reference ?? mr.url);
-    const entry: UnknownRecord = byReference.get(reference) ?? {
-      reference,
-      title: mr.title,
-      url: mr.url,
-      updatedAt: mr.updatedAt,
-    };
-    if (mr.draft === true) entry.draft = true;
-    if (pipeline) entry.pipeline = pipeline.status;
-    const mergeability = (mr.mergeability ?? {}) as UnknownRecord;
-    if (mergeability.status && mergeability.status !== "unchecked") {
-      entry.mergeStatus = mergeability.status;
+  for (const project of asArray(data.projects)) {
+    for (
+      const [kind, list] of [
+        ["review", project.reviewRequests],
+        ["my merge request", project.authoredMergeRequests],
+        ["my merge request", project.assignedMergeRequests],
+      ] as const
+    ) {
+      for (const mr of asArray(list)) {
+        const ref = String(mr.reference ?? mr.url);
+        if (seen.has(ref)) continue;
+        seen.add(ref);
+        seenUrls.add(String(mr.url ?? ""));
+        const reasons = (mr.actionReasons as string[]) ?? [];
+        const extra: string[] = [];
+        if (mr.draft === true) extra.push("draft");
+        const approvals = (mr.approvals ?? null) as UnknownRecord | null;
+        const approvedBy = (approvals?.approvedBy as string[]) ?? [];
+        if (approvedBy.length > 0) extra.push(`approved by ${approvedBy.join(", ")}`);
+        items.push({
+          priority: rank(reasons, kind === "review"),
+          source: "gitlab",
+          kind,
+          ref,
+          title: String(mr.title ?? ""),
+          url: String(mr.url ?? ""),
+          why: phrase(reasons, extra),
+        });
+      }
     }
-    if (mergeability.hasConflicts === true) entry.conflicts = true;
-    if (mr.discussionsResolved === false) entry.unresolvedDiscussions = true;
-    if (approvals) {
-      const approvedBy = (approvals.approvedBy as string[]) ?? [];
-      if (approvedBy.length > 0) entry.approvedBy = approvedBy;
-      if (typeof approvals.remaining === "number") entry.approvalsRemaining = approvals.remaining;
+    for (const issue of asArray(project.assignedIssues)) {
+      if (issue.overdue !== true && !issue.dueDate) continue;
+      const reasons = (issue.actionReasons as string[]) ?? [];
+      items.push({
+        priority: issue.overdue === true ? 1 : 2,
+        source: "gitlab",
+        kind: "issue",
+        ref: String(issue.reference ?? ""),
+        title: String(issue.title ?? ""),
+        url: String(issue.url ?? ""),
+        why: phrase(reasons, issue.dueDate ? [`due ${issue.dueDate}`] : []),
+      });
     }
-    const reasons = new Set([
-      ...((entry.actionReasons as string[]) ?? []),
-      ...((mr.actionReasons as string[]) ?? []),
-    ]);
-    if (reasons.size > 0) entry.actionReasons = [...reasons];
-    byReference.set(reference, entry);
   }
-  return [...byReference.values()];
+
+  // Recurring bot todos are removed here as well as in the Telegram renderer, otherwise the
+  // flat work list fills up with them and starves the merge requests.
+  const { kept } = partitionTodos(asArray(data.todos), filters);
+  for (const todo of kept) {
+    const target = (todo.target ?? {}) as UnknownRecord;
+    const url = String(todo.target_url ?? "");
+    if (seenUrls.has(url)) continue;
+    seenUrls.add(url);
+    const author = (todo.author ?? {}) as UnknownRecord;
+    const action = String(todo.action_name ?? "todo").replace(/_/g, " ");
+    items.push({
+      priority: 2,
+      source: "gitlab",
+      kind: "todo",
+      ref: String(
+        target.reference ??
+          (todo.project as UnknownRecord)?.path_with_namespace ??
+          action,
+      ),
+      title: String(target.title ?? todo.body ?? ""),
+      url,
+      why: `${action} by ${author.username ?? "someone"}`,
+    });
+  }
+  return items;
 }
 
-function workItems(value: unknown) {
-  return asArray(value).map((item) => ({
-    reference: item.reference,
-    title: item.title,
-    url: item.url,
-    updatedAt: item.updatedAt,
-    checks: item.checks,
-    reviewDecision: item.reviewDecision,
-    actionReasons: (item.actionReasons as string[]) ?? [],
-  }));
+/** Within a priority, work you own or must review outranks inbox-style todos. */
+function KIND_ORDER(item: WorkItem): number {
+  if (item.kind === "review") return 0;
+  if (item.kind === "my merge request") return 1;
+  if (item.kind === "issue") return 2;
+  if (item.kind === "notification") return 4;
+  return 3;
 }
 
-function metricPair(value: unknown) {
-  const metric = (value ?? {}) as UnknownRecord;
-  return metric.delta === null || metric.delta === undefined
-    ? { current: metric.current ?? null }
-    : { current: metric.current, delta: metric.delta };
+function githubWork(section: SectionResult<unknown>): WorkItem[] {
+  if (!section.data) return [];
+  const todos = ((section.data as UnknownRecord).todos ?? {}) as UnknownRecord;
+  const items: WorkItem[] = [];
+
+  for (
+    const [kind, list] of [
+      ["review", todos.reviewRequests],
+      ["pull request", todos.assignedPullRequests],
+      ["pull request", todos.authoredPullRequests],
+      ["issue", todos.assignedIssues],
+    ] as const
+  ) {
+    for (const item of asArray(list)) {
+      const reasons = (item.actionReasons as string[]) ?? [];
+      if (reasons.length === 0) continue;
+      items.push({
+        priority: rank(reasons, kind === "review"),
+        source: "github",
+        kind,
+        ref: String(item.reference ?? ""),
+        title: String(item.title ?? ""),
+        url: String(item.url ?? ""),
+        why: phrase(reasons, []),
+      });
+    }
+  }
+
+  for (const note of asArray(todos.notifications)) {
+    const subject = (note.subject ?? {}) as UnknownRecord;
+    items.push({
+      priority: 2,
+      source: "github",
+      kind: "notification",
+      ref: String((note.repository as UnknownRecord)?.full_name ?? ""),
+      title: String(subject.title ?? ""),
+      url: "",
+      why: String(note.reason ?? "notification").replace(/_/g, " "),
+    });
+  }
+  return items;
+}
+
+function metrics(section: SectionResult<unknown>): unknown[] {
+  if (!section.data) return [];
+  return asArray((section.data as UnknownRecord).repositories).map((repo) => {
+    const stars = (repo.stars ?? {}) as UnknownRecord;
+    const downloads = (repo.releaseDownloads ?? {}) as UnknownRecord;
+    const entry: UnknownRecord = { name: repo.name, stars: stars.current };
+    if (typeof stars.delta === "number" && stars.delta !== 0) entry.starsChange = stars.delta;
+    if (downloads.current) entry.downloads = downloads.current;
+    if (typeof downloads.delta === "number" && downloads.delta !== 0) {
+      entry.downloadsChange = downloads.delta;
+    }
+    return entry;
+  });
+}
+
+function recap(section: SectionResult<unknown>, maxItems: number): unknown {
+  if (!section.data) return undefined;
+  const projects = asArray((section.data as UnknownRecord).projects);
+  const merged: unknown[] = [];
+  const closed: unknown[] = [];
+  let since: string | null = null;
+  for (const project of projects) {
+    const projectRecap = project.recap as UnknownRecord | null | undefined;
+    if (!projectRecap) continue;
+    since = String(projectRecap.since ?? "").slice(0, 10);
+    for (const mr of asArray(projectRecap.mergedMergeRequests)) {
+      merged.push({ ref: mr.reference, title: mr.title, url: mr.url });
+    }
+    for (const issue of asArray(projectRecap.closedIssues)) {
+      closed.push({ ref: issue.reference, title: issue.title, url: issue.url });
+    }
+  }
+  if (!since) return undefined;
+  return {
+    since,
+    mergedCount: merged.length,
+    merged: merged.slice(0, maxItems),
+    closedCount: closed.length,
+    closed: closed.slice(0, maxItems),
+  };
+}
+
+/** 1 blocked or failing, 2 waiting on Kushal, 3 in flight. */
+function rank(reasons: string[], waiting: boolean): 1 | 2 | 3 {
+  if (reasons.some((reason) => BLOCKING.has(reason))) return 1;
+  if (waiting || reasons.includes("assigned")) return 2;
+  return 3;
+}
+
+function phrase(reasons: string[], extra: string[]): string {
+  const ordered = Object.keys(REASON_TEXT).filter((key) => reasons.includes(key));
+  const unknown = reasons.filter((reason) => !REASON_TEXT[reason]).map((reason) =>
+    reason.replace(/_/g, " ")
+  );
+  const parts = [...ordered.map((key) => REASON_TEXT[key]), ...unknown, ...extra];
+  return parts.length > 0 ? parts.join(", ") : "no action flagged";
 }
 
 function asArray(value: unknown): UnknownRecord[] {
   return Array.isArray(value) ? value as UnknownRecord[] : [];
 }
 
-function countOf(value: unknown): number {
-  return Array.isArray(value) ? value.length : 0;
-}
-
 function deduplicate(events: UnknownRecord[]): UnknownRecord[] {
-  const byKey = new Map<string, UnknownRecord & { sources: string[] }>();
+  const byKey = new Map<string, UnknownRecord>();
   for (const event of events) {
     const key = `${event.title}|${event.start}|${event.end}`;
-    const existing = byKey.get(key);
-    if (existing) existing.sources.push(String(event.account));
-    else byKey.set(key, { ...event, sources: [String(event.account)] });
+    if (!byKey.has(key)) byKey.set(key, event);
   }
   return [...byKey.values()];
 }

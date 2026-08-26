@@ -198,23 +198,33 @@ the output.
 
 ## Agent Format
 
-`--format agent` emits a compact projection of the same run, intended for a language model that
-writes the prose instead of the deterministic renderer:
+`--format agent` emits a compact, flat projection of the same run, intended for a language model
+that writes the prose instead of the deterministic renderer:
 
 ```sh
 deno task agent --pretty
+deno task agent --max-items 8      # tighter, for a small local model
 ```
 
 The default `json` format is a faithful dump of every upstream response and runs to roughly 180 KB,
 most of it avatar URLs, project descriptions and long-tail backlog items. The agent projection is
-about 10 KB — a 94% reduction — because it:
+about 7 KB at the default cap and 4 KB at `--max-items 5`.
 
-- applies the `filters` block to mail and GitLab todos, and reports how many items it removed
-- collapses repeated messages and merges the overlapping authored and assigned merge request lists
-- buckets calendar events into today, tomorrow and later, and separates holidays from appointments
-- keeps only merge requests and issues that carry an action reason or a due date, with counts for
-  the remainder
-- records each section's status and every collector warning under `sections` and `problems`
+The shape is built for a small, locally hosted model with a short context window that reasons poorly
+over deep JSON, so it does the judging up front:
+
+- **One flat `work` array** replaces five nested per-project buckets. Each entry carries `priority`,
+  `source`, `kind`, `ref`, `title`, `url` and `why`.
+- **Ranking is already applied.** Priority 1 is blocked or failing, 2 is waiting on you, 3 is in
+  flight. Within a priority, reviews and your own merge requests outrank inbox-style todos. The
+  narrator can read the array in order instead of judging urgency.
+- **Reasons are pre-phrased in English.** `pipeline_failed` arrives as `"pipeline failed"`, and
+  approvers are named, so no reason code has to be interpreted.
+- **Every list is capped** by `--max-items` with an explicit `workOmitted` or `itemsOmitted` count,
+  so a busy day cannot overflow the context window.
+- **Filters and deduplication are applied**, and the counts of what was removed are reported so the
+  narrator can say "the rest was newsletters" truthfully without being handed the newsletters.
+- **Section health** is summarised under `health.collected` and `health.problems`.
 
 The projection is lossy by design. Use the default format when you need the complete record.
 

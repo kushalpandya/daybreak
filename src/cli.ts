@@ -12,6 +12,7 @@ export interface CliOptions {
   config: string;
   pretty: boolean;
   format: "json" | "agent";
+  maxItems: number;
   sections: Set<string>;
   reportingDate?: string;
   writeState: boolean;
@@ -47,6 +48,12 @@ export function parseCli(args: string[]): CliOptions {
         throw new Error(`unknown format: ${format} (expected json or agent)`);
       }
       options.format = format;
+    } else if (arg === "--max-items") {
+      const value = Number(requiredValue(args, index++, arg));
+      if (!Number.isInteger(value) || value < 1 || value > 100) {
+        throw new Error("--max-items must be an integer between 1 and 100");
+      }
+      options.maxItems = value;
     } else if (arg === "--dry-run") options.dryRun = true;
     else if (arg === "--no-write-state") options.writeState = false;
     else if (arg === "--config") options.config = requiredValue(args, index++, arg);
@@ -72,6 +79,7 @@ function defaults(command: CliOptions["command"]): CliOptions {
     config: "config.yml",
     pretty: false,
     format: "json",
+    maxItems: 15,
     sections: new Set(SECTIONS),
     writeState: true,
     dryRun: false,
@@ -98,7 +106,9 @@ Fetch options:
   --config PATH          Configuration file (defaults to ./config.yml)
   --pretty               Pretty-print JSON output
   --format json|agent    json: full normalized payload (default)
-                         agent: compact, filtered payload for an LLM narrator
+                         agent: compact, flat, pre-ranked payload for an LLM
+  --max-items N          Cap entries per list in the agent format (default 15).
+                         Lower it for a local model with a short context window.
   --section LIST         Comma-separated sections to fetch
   --date YYYY-MM-DD      Replay using a reporting date at 07:00 local time
   --no-write-state       Do not save GitHub metric snapshots

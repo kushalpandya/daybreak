@@ -24,3 +24,13 @@ Deno.test("parseCli rejects an unknown format", () => {
     "unknown format: yaml",
   );
 });
+
+Deno.test("parseCli defaults and validates the agent item cap", () => {
+  assertEquals(parseCli(["fetch"]).maxItems, 15);
+  assertEquals(parseCli(["fetch", "--max-items", "6"]).maxItems, 6);
+  assertThrows(
+    () => parseCli(["fetch", "--max-items", "0"]),
+    Error,
+    "--max-items must be an integer between 1 and 100",
+  );
+});

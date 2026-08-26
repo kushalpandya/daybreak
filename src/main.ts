@@ -60,7 +60,7 @@ if (import.meta.main) {
             }
           } else {
             const payload = options.format === "agent"
-              ? renderAgentBrief(output, config.filters)
+              ? renderAgentBrief(output, config.filters, { maxItems: options.maxItems })
               : output;
             console.log(JSON.stringify(payload, null, options.pretty ? 2 : undefined));
           }

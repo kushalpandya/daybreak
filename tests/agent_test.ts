@@ -1,16 +1,11 @@
 import { assertEquals } from "@std/assert";
-import { renderAgentBrief } from "../src/output/agent.ts";
+import { type AgentBrief, renderAgentBrief } from "../src/output/agent.ts";
 import { NO_FILTERS } from "../src/output/select.ts";
+import type { BriefFilters, DaybreakConfig } from "../src/config.ts";
 import type { BriefOutput, SectionResult } from "../src/types.ts";
 
 function section(data: unknown): SectionResult<unknown> {
-  return {
-    status: "ok",
-    collectedAt: "2026-08-25T12:00:00Z",
-    durationMs: 1,
-    data,
-    warnings: [],
-  };
+  return { status: "ok", collectedAt: "2026-08-25T12:00:00Z", durationMs: 1, data, warnings: [] };
 }
 
 const skipped: SectionResult<unknown> = {
@@ -46,9 +41,37 @@ function output(overrides: Partial<BriefOutput> = {}): BriefOutput {
   };
 }
 
+function mergeRequest(overrides: Record<string, unknown> = {}) {
+  return {
+    reference: "group/project!1",
+    title: "A change",
+    url: "https://example.test/1",
+    updatedAt: "2026-08-25T09:00:00Z",
+    actionReasons: [],
+    ...overrides,
+  };
+}
+
+function gitlabSection(project: Record<string, unknown>, todos: unknown[] = []) {
+  return section({
+    todos,
+    projects: [{
+      path: "group/project",
+      metrics: { stars: { current: 1, delta: null } },
+      reviewRequests: [],
+      authoredMergeRequests: [],
+      assignedMergeRequests: [],
+      assignedIssues: [],
+      authoredIssues: [],
+      ...project,
+    }],
+  });
+}
+
 Deno.test("renderAgentBrief reports the weekday and section health", () => {
   const brief = renderAgentBrief(
     output({
+      weather: section({ current: {}, today: {}, units: {} }),
       gitlab: {
         ...skipped,
         status: "error",
@@ -60,11 +83,11 @@ Deno.test("renderAgentBrief reports the weekday and section health", () => {
 
   assertEquals(brief.weekday, "Tuesday");
   assertEquals(brief.weekend, false);
-  assertEquals(brief.sections.gitlab, "error");
-  assertEquals(brief.problems, ["gitlab: glab exploded"]);
+  assertEquals(brief.health.collected, ["weather"]);
+  assertEquals(brief.health.problems, ["gitlab: glab exploded"]);
 });
 
-Deno.test("renderAgentBrief buckets calendar events by local day", () => {
+Deno.test("renderAgentBrief separates holidays from appointments", () => {
   const brief = renderAgentBrief(
     output({
       calendar: section({
@@ -73,14 +96,6 @@ Deno.test("renderAgentBrief buckets calendar events by local day", () => {
             title: "Standup",
             start: "2026-08-25T14:00:00Z",
             end: "2026-08-25T14:15:00Z",
-            allDay: false,
-            account: 1,
-            calendar: { name: "Work" },
-          },
-          {
-            title: "Retro",
-            start: "2026-08-26T14:00:00Z",
-            end: "2026-08-26T15:00:00Z",
             allDay: false,
             account: 1,
             calendar: { name: "Work" },
@@ -100,82 +115,156 @@ Deno.test("renderAgentBrief buckets calendar events by local day", () => {
   );
 
   const calendar = brief.calendar as {
-    today: Array<{ title: string; when: string }>;
-    tomorrow: Array<{ title: string }>;
+    today: Array<{ at: string; title: string }>;
     observances: string[];
   };
-  assertEquals(calendar.today.length, 1);
-  assertEquals(calendar.today[0].title, "Standup");
-  assertEquals(calendar.today[0].when, "10:00");
-  assertEquals(calendar.tomorrow.map((event) => event.title), ["Retro"]);
+  assertEquals(calendar.today, [{ at: "10:00", title: "Standup" }]);
   assertEquals(calendar.observances, ["Onam (tomorrow)"]);
 });
 
-Deno.test("renderAgentBrief merges authored and assigned merge requests", () => {
-  const shared = {
-    reference: "group/project!1",
-    title: "Shared",
-    url: "https://example.test/1",
-    updatedAt: "2026-08-25T09:00:00Z",
-    mergeability: { status: "mergeable", hasConflicts: false },
-    pipeline: { status: "success" },
-    approvals: { required: 1, remaining: 0, approvedBy: ["reviewer"] },
-  };
+Deno.test("renderAgentBrief ranks blocked work above waiting work", () => {
   const brief = renderAgentBrief(
     output({
-      gitlab: section({
-        todos: [],
-        projects: [{
-          path: "group/project",
-          metrics: { stars: { current: 1, delta: null } },
-          reviewRequests: [],
-          authoredMergeRequests: [{ ...shared, actionReasons: ["ready_to_merge"] }],
-          assignedMergeRequests: [{ ...shared, actionReasons: ["assigned"] }],
-          assignedIssues: [],
-          authoredIssues: [],
-        }],
+      gitlab: gitlabSection({
+        reviewRequests: [
+          mergeRequest({
+            reference: "group/project!2",
+            url: "https://example.test/2",
+            actionReasons: ["review_requested"],
+          }),
+        ],
+        authoredMergeRequests: [
+          mergeRequest({ actionReasons: ["pipeline_failed"] }),
+        ],
       }),
     }),
     NO_FILTERS,
   );
 
-  const gitlab = brief.gitlab as {
-    projects: Array<{ myMergeRequests: Array<Record<string, unknown>> }>;
-  };
-  const merged = gitlab.projects[0].myMergeRequests;
-  assertEquals(merged.length, 1);
-  assertEquals(merged[0].approvedBy, ["reviewer"]);
+  assertEquals(brief.work.map((item) => item.ref), ["group/project!1", "group/project!2"]);
+  assertEquals(brief.work[0].priority, 1);
+  assertEquals(brief.work[1].priority, 2);
+});
+
+Deno.test("renderAgentBrief phrases reasons in English and names approvers", () => {
+  const brief = renderAgentBrief(
+    output({
+      gitlab: gitlabSection({
+        authoredMergeRequests: [
+          mergeRequest({
+            draft: true,
+            actionReasons: ["pipeline_failed", "unresolved_discussions"],
+            approvals: { required: 1, remaining: 0, approvedBy: ["jerasmus"] },
+          }),
+        ],
+      }),
+    }),
+    NO_FILTERS,
+  );
+
   assertEquals(
-    new Set(merged[0].actionReasons as string[]),
-    new Set(["ready_to_merge", "assigned"]),
+    brief.work[0].why,
+    "pipeline failed, unresolved threads, draft, approved by jerasmus",
   );
 });
 
-Deno.test("renderAgentBrief lists only dated assigned issues", () => {
+Deno.test("renderAgentBrief deduplicates authored and assigned merge requests", () => {
+  const shared = mergeRequest({ actionReasons: ["assigned"] });
   const brief = renderAgentBrief(
     output({
-      gitlab: section({
-        todos: [],
-        projects: [{
-          path: "group/project",
-          metrics: { stars: { current: 1, delta: null } },
-          reviewRequests: [],
-          authoredMergeRequests: [],
-          assignedMergeRequests: [],
-          assignedIssues: [
-            { reference: "a#1", title: "Dated", dueDate: "2026-08-30", overdue: false },
-            { reference: "a#2", title: "Backlog", dueDate: null, overdue: false },
-          ],
-          authoredIssues: [],
-        }],
+      gitlab: gitlabSection({
+        authoredMergeRequests: [shared],
+        assignedMergeRequests: [shared],
       }),
     }),
     NO_FILTERS,
   );
 
-  const gitlab = brief.gitlab as {
-    projects: Array<{ assignedIssues: unknown[]; assignedIssuesTotal: number }>;
-  };
-  assertEquals(gitlab.projects[0].assignedIssues.length, 1);
-  assertEquals(gitlab.projects[0].assignedIssuesTotal, 2);
+  assertEquals(brief.work.length, 1);
 });
+
+Deno.test("renderAgentBrief applies todo filters and drops todos duplicating a merge request", () => {
+  const filters: BriefFilters = {
+    mailIgnoreCategories: [],
+    mailIgnoreSenders: [],
+    todoIgnoreTitles: ["community contributions report"],
+  };
+  const brief = renderAgentBrief(
+    output({
+      gitlab: gitlabSection(
+        {
+          reviewRequests: [mergeRequest({ actionReasons: ["review_requested"] })],
+        },
+        [
+          {
+            action_name: "assigned",
+            target: { title: "Community contributions report" },
+            target_url: "https://example.test/bot",
+            author: { username: "gitlab-bot" },
+          },
+          {
+            action_name: "review_requested",
+            target: { title: "A change" },
+            target_url: "https://example.test/1",
+            author: { username: "someone" },
+          },
+          {
+            action_name: "mentioned",
+            target: { title: "Real todo", reference: "group/project#9" },
+            target_url: "https://example.test/9",
+            author: { username: "colleague" },
+            project: { path_with_namespace: "group/project" },
+          },
+        ],
+      ),
+    }),
+    filters,
+  );
+
+  assertEquals(brief.work.map((item) => item.title), ["A change", "Real todo"]);
+  assertEquals(brief.work[1].why, "mentioned by colleague");
+});
+
+Deno.test("renderAgentBrief caps lists and counts the remainder", () => {
+  const brief: AgentBrief = renderAgentBrief(
+    output({
+      gitlab: gitlabSection({
+        reviewRequests: Array.from({ length: 5 }, (_unused, index) =>
+          mergeRequest({
+            reference: `group/project!${index}`,
+            url: `https://example.test/${index}`,
+            actionReasons: ["review_requested"],
+          })),
+      }),
+    }),
+    NO_FILTERS,
+    { maxItems: 2 },
+  );
+
+  assertEquals(brief.work.length, 2);
+  assertEquals(brief.workOmitted, 3);
+});
+
+Deno.test("renderAgentBrief only reports metric changes that moved", () => {
+  const brief = renderAgentBrief(
+    output({
+      github: section({
+        repositories: [
+          {
+            name: "owner/one",
+            stars: { current: 10, delta: 2 },
+            releaseDownloads: { current: 100, delta: 0 },
+            openIssues: 1,
+          },
+        ],
+        todos: {},
+      }),
+    }),
+    NO_FILTERS,
+  );
+
+  assertEquals(brief.metrics, [{ name: "owner/one", stars: 10, starsChange: 2, downloads: 100 }]);
+});
+
+// Keeps the DaybreakConfig import meaningful for type-level regressions.
+const _filtersAreConfigShaped: DaybreakConfig["filters"] = NO_FILTERS;
