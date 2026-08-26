@@ -1,0 +1,48 @@
+schema_version: 1
+
+brief:
+  timezone: America/New_York
+  mail_lookback: 24h
+  calendar_lookahead: 48h
+
+weather:
+  enabled: true
+  name: New York
+  latitude: 40.7128
+  longitude: -74.0060
+  units: metric
+
+google:
+  enabled: true
+  include_declined: false
+  accounts:
+    - id: 1
+      address: primary@example.com
+      config_dir: ~/.config/daybreak/google/1
+      max_messages: 500
+    - id: 2
+      address: secondary@example.com
+      config_dir: ~/.config/daybreak/google/2
+      max_messages: 500
+
+github:
+  enabled: true
+  repositories:
+    - owner/project
+  lookback: 24h
+  max_items: 100
+
+gitlab:
+  enabled: true
+  host: gitlab.com
+  projects:
+    - group/project
+  max_items_per_category: 100
+
+telegram:
+  enabled: false
+  chat_id: 123456789
+  disable_link_previews: true
+
+state:
+  database: ~/.local/share/daybreak/daybreak.db
