@@ -5,7 +5,8 @@ document. It is the deterministic data layer for a personal morning brief.
 
 ## Requirements
 
-- Deno 2.9 or newer for development
+- Deno 2.9 or newer for development (Temporal arrives via `@js-temporal/polyfill`; Deno does not
+  expose the `Temporal` global at runtime, so `src/temporal.ts` supplies it)
 - Google Workspace CLI (`gws`), authenticated once per configured Google account
 - GitHub CLI (`gh`), authenticated for GitHub
 - GitLab CLI (`glab`), authenticated for GitLab
@@ -195,6 +196,74 @@ deno task fetch --section weather,github --pretty --no-write-state
 `stdout` contains the JSON result. Diagnostics from third-party CLIs are captured and do not corrupt
 the output.
 
+## Agent Format
+
+`--format agent` emits a compact, flat projection of the same run, intended for a language model
+that writes the prose instead of the deterministic renderer:
+
+```sh
+deno task agent --pretty
+deno task agent --max-items 8      # tighter, for a small local model
+```
+
+The default `json` format is a faithful dump of every upstream response and runs to roughly 180 KB,
+most of it avatar URLs, project descriptions and long-tail backlog items. The agent projection is
+about 7 KB at the default cap and 4 KB at `--max-items 5`.
+
+The shape is built for a small, locally hosted model with a short context window that reasons poorly
+over deep JSON, so it does the judging up front:
+
+- **One flat `work` array** replaces five nested per-project buckets. Each entry carries `priority`,
+  `source`, `kind`, `ref`, `title`, `url` and `why`.
+- **Ranking is already applied.** Priority 1 is blocked or failing, 2 is waiting on you, 3 is in
+  flight. Within a priority, reviews and your own merge requests outrank inbox-style todos. The
+  narrator can read the array in order instead of judging urgency.
+- **Reasons are pre-phrased in English.** `pipeline_failed` arrives as `"pipeline failed"`, and
+  approvers are named, so no reason code has to be interpreted.
+- **Every list is capped** by `--max-items` with an explicit `workOmitted` or `itemsOmitted` count,
+  so a busy day cannot overflow the context window.
+- **Filters and deduplication are applied**, and the counts of what was removed are reported so the
+  narrator can say "the rest was newsletters" truthfully without being handed the newsletters.
+- **Section health** is summarised under `health.collected` and `health.problems`.
+- **Weather carries an intraday arc**, sampled at 06:00, 09:00, 12:00, 15:00, 18:00 and 21:00 local
+  time, plus tomorrow's outlook, so the narrator can describe the shape of the day rather than only
+  its high and low.
+
+The projection is lossy by design. Use the default format when you need the complete record.
+
+## Filters
+
+Mail and GitLab todos carry a lot of recurring noise. The optional `filters` block removes it for
+both the Telegram renderer and the agent format:
+
+```yaml
+filters:
+  mail_ignore_categories:
+    - promotions
+    - social
+  mail_ignore_senders:
+    - noreply@newsletter.example
+  todo_ignore_titles:
+    - Community contributions report
+```
+
+`mail_ignore_categories` matches Gmail's `CATEGORY_*` labels and defaults to promotions and social.
+The other two lists default to empty and match case-insensitive substrings. Gmail's own `IMPORTANT`
+flag is deliberately not used to select mail, because it fires on a large share of newsletters; a
+read message reaches the brief only when its subject suggests a pending decision.
+
+## Weekly Recap
+
+Set `gitlab.recap` to collect merge requests you merged and issues you closed inside a lookback
+window, alongside the open work:
+
+```yaml
+gitlab:
+  recap: 7d
+```
+
+Omit the key to skip the extra API calls.
+
 ## Telegram Delivery
 
 Create a bot through Telegram's `@BotFather`, then start a chat with the bot. Telegram bots cannot
@@ -266,6 +335,12 @@ running from another directory or selecting a different configuration file.
 - `1`: invalid arguments or configuration
 - `2`: preflight dependency or authentication failure
 - `3`: fetch completed but one or more collectors failed
+
+## Merge Request Detail
+
+GitLab's merge request list endpoint omits `head_pipeline` and reports `detailed_merge_status` as
+`unchecked`. Pipeline status, real merge status and approvals are therefore fetched per merge
+request, for the ones that reach the brief only, capped at 25 per project.
 
 ## State
 

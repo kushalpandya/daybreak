@@ -5,6 +5,16 @@ brief:
   mail_lookback: 24h
   calendar_lookahead: 48h
 
+filters:
+  # Gmail category labels treated as noise. Defaults to [promotions, social].
+  mail_ignore_categories:
+    - promotions
+    - social
+  # Case-insensitive substrings matched against the sender name and address.
+  mail_ignore_senders: []
+  # Case-insensitive substrings matched against GitLab todo titles.
+  todo_ignore_titles: []
+
 weather:
   enabled: true
   name: New York
@@ -38,6 +48,8 @@ gitlab:
   projects:
     - group/project
   max_items_per_category: 100
+  # Lookback for merged MRs and closed issues; omit to skip the recap.
+  recap: 7d
 
 telegram:
   enabled: false

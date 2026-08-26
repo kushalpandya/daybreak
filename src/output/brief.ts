@@ -1,6 +1,6 @@
+import type { BriefFilters } from "../config.ts";
 import type { BriefOutput, SectionResult } from "../types.ts";
-
-type UnknownRecord = Record<string, unknown>;
+import { NO_FILTERS, partitionTodos, selectMail, type UnknownRecord } from "./select.ts";
 
 const HORIZONTAL_RULE = "━━━━━━━━━━━━━━━━━━━━";
 const SECTION_TITLES: Record<string, string> = {
@@ -11,7 +11,7 @@ const SECTION_TITLES: Record<string, string> = {
   GITLAB: "🦊 GITLAB",
 };
 
-export function renderBrief(output: BriefOutput): string {
+export function renderBrief(output: BriefOutput, filters: BriefFilters = NO_FILTERS): string {
   const date = new Intl.DateTimeFormat("en-CA", {
     dateStyle: "full",
     timeZone: output.run.timezone,
@@ -19,9 +19,9 @@ export function renderBrief(output: BriefOutput): string {
   const parts = [`☀️ ${date}`];
   parts.push(renderWeather(output.weather));
   parts.push(renderCalendar(output.calendar));
-  parts.push(renderMail(output.mail));
+  parts.push(renderMail(output.mail, filters));
   parts.push(renderGithub(output.github));
-  parts.push(renderGitlab(output.gitlab));
+  parts.push(renderGitlab(output.gitlab, filters));
   return parts.filter(Boolean).join(`\n\n${HORIZONTAL_RULE}\n\n`);
 }
 
@@ -30,14 +30,21 @@ function renderWeather(section: SectionResult<unknown>): string {
   const data = section.data as UnknownRecord;
   const current = data.current as UnknownRecord;
   const today = data.today as UnknownRecord;
+  const tomorrow = data.tomorrow as UnknownRecord | null;
   const units = data.units as UnknownRecord;
-  return [
+  const lines = [
     SECTION_TITLES.WEATHER,
     `${
       data.location && (data.location as UnknownRecord).name
     }: ${current.temperature}${units.temperature}, ${current.condition}. Feels like ${current.apparentTemperature}${units.temperature}.`,
     `High ${today.maximumTemperature}${units.temperature}, low ${today.minimumTemperature}${units.temperature}. Rain chance ${today.precipitationProbabilityPercent}%.`,
-  ].join("\n");
+  ];
+  if (tomorrow) {
+    lines.push(
+      `Tomorrow: ${tomorrow.condition}, high ${tomorrow.maximumTemperature}${units.temperature}, rain chance ${tomorrow.precipitationProbabilityPercent}%.`,
+    );
+  }
+  return lines.join("\n");
 }
 
 function renderCalendar(section: SectionResult<unknown>): string {
@@ -58,21 +65,23 @@ function renderCalendar(section: SectionResult<unknown>): string {
   return appendWarnings(lines, section);
 }
 
-function renderMail(section: SectionResult<unknown>): string {
+function renderMail(section: SectionResult<unknown>, filters: BriefFilters): string {
   if (!section.data) return sectionUnavailable("EMAIL", section);
   const accounts = ((section.data as UnknownRecord).accounts as UnknownRecord[]) ?? [];
+  const messages = accounts.flatMap((account) => (account.messages as UnknownRecord[]) ?? []);
+  const unread = messages.filter((message) => message.unread === true).length;
+  const { signal, dropped } = selectMail(messages, filters);
   const lines = [SECTION_TITLES.EMAIL];
-  for (const account of accounts) {
-    const messages = (account.messages as UnknownRecord[]) ?? [];
-    const unread = messages.filter((message) => message.unread === true).length;
-    lines.push(
-      `Account ${account.id}, ${account.address}: ${account.messageCount} messages, ${unread} unread.`,
-    );
-    for (const message of selectMail(messages).slice(0, 4)) {
-      const sender = message.sender as UnknownRecord;
-      lines.push(`- ${sender.name ?? sender.address}: ${message.subject}`);
-    }
+  lines.push(`${messages.length} received in the last day, ${unread} unread.`);
+  if (signal.length === 0) lines.push("Nothing needing attention.");
+  for (const message of signal.slice(0, 6)) {
+    const sender = message.sender as UnknownRecord;
+    const flag = message.unread === true ? "" : " (read)";
+    lines.push(`- ${sender.name ?? sender.address}: ${message.subject}${flag}`);
   }
+  if (signal.length > 6) lines.push(`- ${signal.length - 6} more worth a look`);
+  const noise = dropped.category + dropped.sender + dropped.noSignal;
+  if (noise > 0) lines.push(`${noise} filtered as newsletters, promotions or already handled.`);
   return appendWarnings(lines, section);
 }
 
@@ -103,13 +112,14 @@ function renderGithub(section: SectionResult<unknown>): string {
   return lines.join("\n");
 }
 
-function renderGitlab(section: SectionResult<unknown>): string {
+function renderGitlab(section: SectionResult<unknown>, filters: BriefFilters): string {
   if (!section.data) return sectionUnavailable("GITLAB", section);
   const data = section.data as UnknownRecord;
-  const todos = (data.todos as UnknownRecord[]) ?? [];
+  const { kept: todos, ignored } = partitionTodos((data.todos as UnknownRecord[]) ?? [], filters);
   const projects = (data.projects as UnknownRecord[]) ?? [];
-  const lines = [SECTION_TITLES.GITLAB, `${todos.length} pending todos.`];
-  for (const todo of todos.slice(0, 4)) {
+  const ignoredSuffix = ignored > 0 ? ` (${ignored} filtered)` : "";
+  const lines = [SECTION_TITLES.GITLAB, `${todos.length} pending todos${ignoredSuffix}.`];
+  for (const todo of todos.slice(0, 6)) {
     const target = todo.target as UnknownRecord | undefined;
     lines.push(`- ${todo.action_name}: ${target?.title ?? todo.body ?? todo.target_type}`);
   }
@@ -125,14 +135,6 @@ function renderGitlab(section: SectionResult<unknown>): string {
     }
   }
   return lines.join("\n");
-}
-
-function selectMail(messages: UnknownRecord[]): UnknownRecord[] {
-  const pattern = /security alert|expired|balance|supporter|invoice|payment|renew/i;
-  return messages.filter((message) =>
-    message.unread === true || pattern.test(String(message.subject))
-  )
-    .sort((a, b) => Number(b.important === true) - Number(a.important === true));
 }
 
 function deduplicateEvents(events: UnknownRecord[]): UnknownRecord[] {

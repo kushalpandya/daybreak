@@ -10,6 +10,7 @@ Deno.test("createRunContext uses local day boundaries across DST", () => {
       mailLookbackMs: 86_400_000,
       calendarLookaheadMs: 172_800_000,
     },
+    filters: { mailIgnoreCategories: [], mailIgnoreSenders: [], todoIgnoreTitles: [] },
     state: { database: ":memory:" },
   };
   const run = createRunContext(config, "2026-03-08");

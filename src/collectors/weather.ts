@@ -27,7 +27,7 @@ export async function collectWeather(
     current: "temperature_2m,apparent_temperature,weather_code,precipitation,wind_speed_10m",
     daily:
       "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset",
-    hourly: "precipitation_probability,precipitation",
+    hourly: "precipitation_probability,precipitation,temperature_2m,weather_code",
   }).toString();
 
   const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
@@ -48,6 +48,30 @@ export async function collectWeather(
       ((typeof item.probabilityPercent === "number" && item.probabilityPercent >= 30) ||
         (typeof item.amount === "number" && item.amount > 0))
     );
+
+  // Hourly temperature and condition for the reporting day, so a narrator can describe the
+  // shape of the day rather than only its high and low.
+  const hours = body.hourly.time
+    .map((time, i) => ({
+      time,
+      temperature: body.hourly.temperature_2m[i],
+      weatherCode: body.hourly.weather_code[i],
+      condition: weatherCondition(Number(body.hourly.weather_code[i])),
+      precipitationProbabilityPercent: body.hourly.precipitation_probability[i],
+    }))
+    .filter((item) => typeof item.time === "string" && item.time.startsWith(reportingDate));
+
+  const tomorrowIndex = index + 1;
+  const tomorrow = tomorrowIndex < (body.daily.time?.length ?? 0)
+    ? {
+      date: body.daily.time[tomorrowIndex],
+      minimumTemperature: body.daily.temperature_2m_min[tomorrowIndex],
+      maximumTemperature: body.daily.temperature_2m_max[tomorrowIndex],
+      precipitationProbabilityPercent: body.daily.precipitation_probability_max[tomorrowIndex],
+      weatherCode: body.daily.weather_code[tomorrowIndex],
+      condition: weatherCondition(Number(body.daily.weather_code[tomorrowIndex])),
+    }
+    : null;
 
   return {
     data: {
@@ -79,7 +103,9 @@ export async function collectWeather(
         sunrise: body.daily.sunrise[index],
         sunset: body.daily.sunset[index],
         precipitationPeriods,
+        hours,
       },
+      tomorrow,
     },
   };
 }
