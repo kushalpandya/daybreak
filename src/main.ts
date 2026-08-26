@@ -9,6 +9,7 @@ import { collectGmail } from "./collectors/gmail.ts";
 import { collectWeather } from "./collectors/weather.ts";
 import { runPreflight } from "./preflight.ts";
 import { renderBrief } from "./output/brief.ts";
+import { renderAgentBrief } from "./output/agent.ts";
 import { listTelegramChats, sendTelegramBrief } from "./delivery/telegram.ts";
 import { createRunContext } from "./time.ts";
 import { type BriefOutput, collectSection, skippedSection } from "./types.ts";
@@ -46,7 +47,7 @@ if (import.meta.main) {
             value.status === "error"
           );
           if (options.command === "deliver") {
-            const brief = renderBrief(output);
+            const brief = renderBrief(output, config.filters);
             if (options.dryRun) console.log(brief);
             else {
               if (hasCollectorError) {
@@ -57,7 +58,12 @@ if (import.meta.main) {
                 console.log(JSON.stringify({ status: "ok", delivery }, null, 2));
               }
             }
-          } else console.log(JSON.stringify(output, null, options.pretty ? 2 : undefined));
+          } else {
+            const payload = options.format === "agent"
+              ? renderAgentBrief(output, config.filters)
+              : output;
+            console.log(JSON.stringify(payload, null, options.pretty ? 2 : undefined));
+          }
           if (hasCollectorError) {
             Deno.exitCode = 3;
           }

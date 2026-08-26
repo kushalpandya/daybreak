@@ -8,6 +8,15 @@ export interface GoogleAccountConfig {
   maxMessages: number;
 }
 
+export interface BriefFilters {
+  /** Gmail category labels to treat as noise, e.g. "promotions". */
+  mailIgnoreCategories: string[];
+  /** Case-insensitive substrings matched against sender name and address. */
+  mailIgnoreSenders: string[];
+  /** Case-insensitive substrings matched against todo target titles. */
+  todoIgnoreTitles: string[];
+}
+
 export interface DaybreakConfig {
   schemaVersion: 1;
   brief: {
@@ -15,6 +24,7 @@ export interface DaybreakConfig {
     mailLookbackMs: number;
     calendarLookaheadMs: number;
   };
+  filters: BriefFilters;
   weather?: {
     name: string;
     latitude: number;
@@ -34,6 +44,8 @@ export interface DaybreakConfig {
     host: string;
     projects: string[];
     maxItemsPerCategory: number;
+    /** Lookback for merged MRs and closed issues, or null to skip the recap. */
+    recapMs: number | null;
   };
   telegram?: {
     chatId: string;
@@ -55,6 +67,7 @@ export async function loadConfig(path: string): Promise<DaybreakConfig> {
     [
       "schema_version",
       "brief",
+      "filters",
       "weather",
       "google",
       "github",
@@ -88,6 +101,7 @@ export async function loadConfig(path: string): Promise<DaybreakConfig> {
         "brief.calendar_lookahead",
       ),
     },
+    filters: parseFilters(config.filters),
     weather: parseWeather(config.weather),
     google: parseGoogle(config.google, baseDir),
     github: parseGithub(config.github),
@@ -100,6 +114,41 @@ export async function loadConfig(path: string): Promise<DaybreakConfig> {
       ),
     },
   };
+}
+
+const DEFAULT_MAIL_IGNORE_CATEGORIES = ["promotions", "social"];
+
+function parseFilters(value: unknown): BriefFilters {
+  if (value === undefined || value === null) {
+    return {
+      mailIgnoreCategories: [...DEFAULT_MAIL_IGNORE_CATEGORIES],
+      mailIgnoreSenders: [],
+      todoIgnoreTitles: [],
+    };
+  }
+  const input = asObject(value, "filters");
+  assertKeys(
+    input,
+    ["mail_ignore_categories", "mail_ignore_senders", "todo_ignore_titles"],
+    "filters",
+  );
+  return {
+    mailIgnoreCategories: stringList(
+      input.mail_ignore_categories,
+      DEFAULT_MAIL_IGNORE_CATEGORIES,
+      "filters.mail_ignore_categories",
+    ).map((entry) => entry.toLowerCase()),
+    mailIgnoreSenders: stringList(input.mail_ignore_senders, [], "filters.mail_ignore_senders")
+      .map((entry) => entry.toLowerCase()),
+    todoIgnoreTitles: stringList(input.todo_ignore_titles, [], "filters.todo_ignore_titles")
+      .map((entry) => entry.toLowerCase()),
+  };
+}
+
+function stringList(value: unknown, fallback: string[], field: string): string[] {
+  if (value === undefined || value === null) return [...fallback];
+  if (!Array.isArray(value)) throw new Error(`${field} must be an array`);
+  return value.map((entry, index) => requiredString(entry, `${field}[${index}]`));
 }
 
 function parseTelegram(value: unknown): DaybreakConfig["telegram"] {
@@ -213,7 +262,7 @@ function parseGitlab(value: unknown): DaybreakConfig["gitlab"] {
   const input = asObject(value, "gitlab");
   assertKeys(
     input,
-    ["enabled", "host", "projects", "max_items_per_category"],
+    ["enabled", "host", "projects", "max_items_per_category", "recap"],
     "gitlab",
   );
   if (input.enabled === false) return undefined;
@@ -236,6 +285,9 @@ function parseGitlab(value: unknown): DaybreakConfig["gitlab"] {
       100,
       "gitlab.max_items_per_category",
     ),
+    recapMs: input.recap === undefined || input.recap === null || input.recap === false
+      ? null
+      : parseDuration(input.recap, "gitlab.recap"),
   };
 }
 

@@ -5,7 +5,8 @@ document. It is the deterministic data layer for a personal morning brief.
 
 ## Requirements
 
-- Deno 2.9 or newer for development
+- Deno 2.9 or newer for development (Temporal arrives via `@js-temporal/polyfill`; Deno does not
+  expose the `Temporal` global at runtime, so `src/temporal.ts` supplies it)
 - Google Workspace CLI (`gws`), authenticated once per configured Google account
 - GitHub CLI (`gh`), authenticated for GitHub
 - GitLab CLI (`glab`), authenticated for GitLab
@@ -195,6 +196,61 @@ deno task fetch --section weather,github --pretty --no-write-state
 `stdout` contains the JSON result. Diagnostics from third-party CLIs are captured and do not corrupt
 the output.
 
+## Agent Format
+
+`--format agent` emits a compact projection of the same run, intended for a language model that
+writes the prose instead of the deterministic renderer:
+
+```sh
+deno task agent --pretty
+```
+
+The default `json` format is a faithful dump of every upstream response and runs to roughly 180 KB,
+most of it avatar URLs, project descriptions and long-tail backlog items. The agent projection is
+about 10 KB — a 94% reduction — because it:
+
+- applies the `filters` block to mail and GitLab todos, and reports how many items it removed
+- collapses repeated messages and merges the overlapping authored and assigned merge request lists
+- buckets calendar events into today, tomorrow and later, and separates holidays from appointments
+- keeps only merge requests and issues that carry an action reason or a due date, with counts for
+  the remainder
+- records each section's status and every collector warning under `sections` and `problems`
+
+The projection is lossy by design. Use the default format when you need the complete record.
+
+## Filters
+
+Mail and GitLab todos carry a lot of recurring noise. The optional `filters` block removes it for
+both the Telegram renderer and the agent format:
+
+```yaml
+filters:
+  mail_ignore_categories:
+    - promotions
+    - social
+  mail_ignore_senders:
+    - noreply@newsletter.example
+  todo_ignore_titles:
+    - Community contributions report
+```
+
+`mail_ignore_categories` matches Gmail's `CATEGORY_*` labels and defaults to promotions and social.
+The other two lists default to empty and match case-insensitive substrings. Gmail's own `IMPORTANT`
+flag is deliberately not used to select mail, because it fires on a large share of newsletters; a
+read message reaches the brief only when its subject suggests a pending decision.
+
+## Weekly Recap
+
+Set `gitlab.recap` to collect merge requests you merged and issues you closed inside a lookback
+window, alongside the open work:
+
+```yaml
+gitlab:
+  recap: 7d
+```
+
+Omit the key to skip the extra API calls.
+
 ## Telegram Delivery
 
 Create a bot through Telegram's `@BotFather`, then start a chat with the bot. Telegram bots cannot
@@ -266,6 +322,12 @@ running from another directory or selecting a different configuration file.
 - `1`: invalid arguments or configuration
 - `2`: preflight dependency or authentication failure
 - `3`: fetch completed but one or more collectors failed
+
+## Merge Request Detail
+
+GitLab's merge request list endpoint omits `head_pipeline` and reports `detailed_merge_status` as
+`unchecked`. Pipeline status, real merge status and approvals are therefore fetched per merge
+request, for the ones that reach the brief only, capped at 25 per project.
 
 ## State
 

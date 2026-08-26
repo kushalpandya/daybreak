@@ -8,6 +8,7 @@
   },
   "tasks": {
     "fetch": "deno run --allow-env --allow-read --allow-write --allow-net=api.open-meteo.com,api.telegram.org --allow-run=gws,gh,glab src/main.ts fetch",
+    "agent": "deno run --allow-env --allow-read --allow-write --allow-net=api.open-meteo.com,api.telegram.org --allow-run=gws,gh,glab src/main.ts fetch --format agent",
     "deliver": "deno run --allow-env --allow-read --allow-write --allow-net=api.open-meteo.com,api.telegram.org --allow-run=gws,gh,glab src/main.ts deliver",
     "telegram:chats": "deno run --allow-env --allow-read=.env --allow-net=api.telegram.org src/main.ts telegram chats",
     "doctor": "deno run --allow-env --allow-read --allow-net=api.open-meteo.com,api.telegram.org --allow-run=gws,gh,glab src/main.ts doctor",

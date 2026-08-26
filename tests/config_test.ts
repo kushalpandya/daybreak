@@ -94,3 +94,27 @@ github:
   );
   await assertRejects(() => loadConfig(path), Error, "between 1 and 100");
 });
+
+Deno.test("loadConfig defaults mail filters and leaves todo filters empty", async () => {
+  const path = await Deno.makeTempFile({ suffix: ".yml" });
+  await Deno.writeTextFile(
+    path,
+    `schema_version: 1\nbrief:\n  timezone: America/Toronto\n  mail_lookback: 24h\n  calendar_lookahead: 48h\n`,
+  );
+  const config = await loadConfig(path);
+  assertEquals(config.filters.mailIgnoreCategories, ["promotions", "social"]);
+  assertEquals(config.filters.todoIgnoreTitles, []);
+  await Deno.remove(path);
+});
+
+Deno.test("loadConfig lowercases filter entries and parses the gitlab recap", async () => {
+  const path = await Deno.makeTempFile({ suffix: ".yml" });
+  await Deno.writeTextFile(
+    path,
+    `schema_version: 1\nbrief:\n  timezone: America/Toronto\n  mail_lookback: 24h\n  calendar_lookahead: 48h\nfilters:\n  todo_ignore_titles:\n    - Community Contributions Report\ngitlab:\n  enabled: true\n  projects:\n    - group/project\n  recap: 7d\n`,
+  );
+  const config = await loadConfig(path);
+  assertEquals(config.filters.todoIgnoreTitles, ["community contributions report"]);
+  assertEquals(config.gitlab?.recapMs, 604_800_000);
+  await Deno.remove(path);
+});
