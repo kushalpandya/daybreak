@@ -1,3 +1,5 @@
+import { Temporal } from "./temporal.ts";
+
 export interface CliOptions {
   command:
     | "fetch"
