@@ -85,7 +85,28 @@ export async function commandJson<T>(command: string, options: CommandOptions = 
 }
 
 function conciseCommandError(command: string, stderr: string, stdout: string): string {
-  const source = stderr || stdout || `exited with a nonzero status`;
-  const line = source.split("\n").find((line) => line.trim() !== "")?.trim() ?? source;
-  return `${command}: ${line}`;
+  return `${command}: ${
+    structuredErrorMessage(stdout) ?? structuredErrorMessage(stderr) ??
+      firstErrorLine(stderr) ?? firstErrorLine(stdout) ?? "exited with a nonzero status"
+  }`;
+}
+
+/** `gws` reports API failures as `{"error":{"message":...}}` on stdout. */
+function structuredErrorMessage(output: string): string | undefined {
+  if (!output.startsWith("{")) return undefined;
+  try {
+    const error = (JSON.parse(output) as { error?: { message?: unknown } }).error;
+    return typeof error?.message === "string" ? error.message : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Prefer a line that announces itself as an error: tools such as `gws` prefix their
+ * output with banners (`Using keyring backend: keyring`) that would otherwise win.
+ */
+function firstErrorLine(output: string): string | undefined {
+  const lines = output.split("\n").map((line) => line.trim()).filter((line) => line !== "");
+  return lines.find((line) => /^(error|fatal|warning)\b/i.test(line)) ?? lines[0];
 }
