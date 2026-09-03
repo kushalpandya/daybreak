@@ -1,374 +1,114 @@
 # Daybreak
 
-Daybreak fetches weather, Gmail, Google Calendar, GitHub, and GitLab data into one normalized JSON
-document. It is the deterministic data layer for a personal morning brief.
+Daybreak assembles your morning brief. It pulls weather, Gmail, Google Calendar, GitHub and GitLab
+into one normalized document, decides what actually deserves your attention, and either renders it
+as text or hands it to a language model to narrate.
 
-## Requirements
+It is the deterministic data layer for a personal morning brief: collection, filtering and ranking
+are ordinary code, so the unpredictable part is confined to the last step.
 
-- Deno 2.9 or newer for development (Temporal arrives via `@js-temporal/polyfill`; Deno does not
-  expose the `Temporal` global at runtime, so `src/temporal.ts` supplies it)
-- Google Workspace CLI (`gws`), authenticated once per configured Google account
-- GitHub CLI (`gh`), authenticated for GitHub
-- GitLab CLI (`glab`), authenticated for GitLab
+## What it collects
 
-The standard Daybreak configuration expects all three integration CLIs to be installed and
-authenticated. Install them on macOS with Homebrew:
+- **Weather** — current conditions, today's arc, and tomorrow's outlook
+- **Gmail** — across multiple accounts, with newsletters and promotions filtered out
+- **Google Calendar** — today and the next two days, holidays kept separate from appointments
+- **GitHub** — your issues, pull requests, review requests, notifications, and star and download
+  counts for repositories you choose
+- **GitLab** — todos, review requests, assigned issues and your own merge requests, with pipeline
+  and merge status resolved
+
+## What you get
+
+```text
+☀️ Wednesday, September 2, 2026
+
+🌤️ WEATHER
+Toronto, Ontario, Canada: 20.4°C, partly cloudy. Feels like 22.1°C.
+High 25.5°C, low 20.1°C. Rain chance 79%.
+Tomorrow: drizzle, high 26.4°C, rain chance 13%.
+
+📬 EMAIL
+46 received in the last day, 2 unread.
+- Example Bank: A payment was made using your Credit Card (read)
+- 3 more worth a look
+37 filtered as newsletters, promotions or already handled.
+
+🦊 GITLAB
+- example-org/example!253151: Add container border to sticky header tables
+  [review_requested, pipeline_failed, unresolved_discussions]
+```
+
+Full examples of every output format are in [the usage guide](usage.md#output-examples).
+
+## How it works
+
+Daybreak never talks to Google, GitHub or GitLab directly. It shells out to their official command
+line tools — `gws`, `gh` and `glab` — and normalizes what comes back. Authentication stays with the
+vendor tools, and no API tokens live in Daybreak's configuration.
+
+There are two output formats:
+
+- **`json`** — the complete normalized record of a run, for archiving or your own tooling
+- **`agent`** — a compact, flat, already-ranked projection built for a small local language model
+  with a short context window. Urgency is judged up front, reasons are pre-phrased in English, and
+  every list is capped, so the model narrates rather than decides.
+
+Delivery to Telegram is built in and deterministic. The agent format is the alternative when you
+want prose instead.
+
+## Quick start
+
+You need [Deno](https://deno.com) 2.9+, plus `gws`, `gh` and `glab` installed and authenticated.
 
 ```sh
+# 1. install the CLIs (macOS)
 brew install --cask gcloud-cli
-brew install googleworkspace-cli
-brew install gh
-brew install glab
-```
+brew install googleworkspace-cli gh glab
 
-The Google Cloud CLI is needed for the initial automated `gws auth setup`. Daybreak does not invoke
-`gcloud` during normal fetches or deliveries.
-
-Authenticate each CLI before running Daybreak:
-
-```sh
-# Google Cloud project and OAuth client setup
-gcloud auth login
-gws auth setup
-
-# GitHub
+# 2. authenticate them
+gcloud auth login && gws auth setup
 gh auth login
-
-# GitLab
 glab auth login --hostname gitlab.com
-```
 
-Google account access needs one separate `gws auth login` per configured profile, as described in
-[Google Authentication](#google-authentication). Verify all dependencies and credentials with:
-
-```sh
-deno task doctor
-```
-
-If an integration is explicitly disabled in `config.yml`, its corresponding CLI is not required for
-that run.
-
-## Google Authentication
-
-Daybreak uses the Google Workspace CLI (`gws`) for Gmail and Calendar access. Each Google account
-must use a separate `gws` configuration directory because signing in again within the same directory
-replaces the previously stored account credentials.
-
-### Configure The OAuth Client
-
-Google requires an OAuth desktop client. Complete this once for the Google Cloud project used by all
-of your Daybreak accounts:
-
-1. Enable the Gmail API and Google Calendar API in Google Cloud Console.
-2. Configure the Google Auth Platform consent screen.
-3. Create an OAuth client with application type **Desktop app**.
-4. Download its client configuration as `client_secret.json`.
-
-With the Google Cloud CLI installed and authenticated as shown above, `gws` can automate the setup:
-
-```sh
-gws auth setup
-```
-
-This setup uses user OAuth for Gmail and Calendar. It does not require a service account.
-
-### Create One Profile Per Account
-
-Create an isolated directory for every account. Both profiles use the same OAuth client but will
-store different encrypted refresh tokens:
-
-```sh
-mkdir -p \
-  "$HOME/.config/daybreak/google/1" \
-  "$HOME/.config/daybreak/google/2"
-
-cp "/path/to/client_secret.json" \
-  "$HOME/.config/daybreak/google/1/client_secret.json"
-
-cp "/path/to/client_secret.json" \
-  "$HOME/.config/daybreak/google/2/client_secret.json"
-```
-
-Authenticate each profile separately with read-only Gmail and Calendar scopes:
-
-```sh
-GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/daybreak/google/1" \
-  gws auth login --readonly -s gmail,calendar
-```
-
-```sh
-GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/daybreak/google/2" \
-  gws auth login --readonly -s gmail,calendar
-```
-
-Select the corresponding Google account in each browser flow. Do not run both logins against the
-same configuration directory, as the second login will replace the first account.
-
-### Configure Daybreak
-
-Reference the profile directories by a stable local alias in `config.yml`:
-
-```yaml
-google:
-  enabled: true
-  include_declined: false
-  accounts:
-    - id: 1
-      address: primary@example.com
-      config_dir: ~/.config/daybreak/google/1
-      max_messages: 500
-    - id: 2
-      address: secondary@example.com
-      config_dir: ~/.config/daybreak/google/2
-      max_messages: 500
-```
-
-The numeric IDs and addresses appear in normalized output. Add more accounts by continuing the
-sequence with `3`, `4`, and so on. Daybreak verifies during preflight that each configured address
-matches the Google account authenticated in its `gws` profile.
-
-### Verify Authentication
-
-Check each `gws` profile directly:
-
-```sh
-GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/daybreak/google/1" \
-  gws auth status
-
-GOOGLE_WORKSPACE_CLI_CONFIG_DIR="$HOME/.config/daybreak/google/2" \
-  gws auth status
-```
-
-Then run Daybreak's preflight, which verifies every configured profile before collection starts:
-
-```sh
-deno task doctor
-```
-
-Keep `client_secret.json`, encrypted credentials, and exported tokens out of version control. The
-OAuth client file can be reused on another machine, but each account should normally be
-authenticated again there so `gws` creates machine-local encrypted credentials.
-
-If the OAuth app has External audience and remains in Testing status, Google normally expires Gmail
-and Calendar refresh tokens after seven days. Use an appropriate production OAuth configuration for
-long-running unattended use, subject to Google's current verification and restricted-scope policies.
-
-## Setup
-
-Copy `config.example.yml` to `config.yml` and update the timezone, coordinates, Google profile
-paths, and GitHub repositories.
-
-Copy `.env.example` to `.env` and add secrets required by enabled integrations:
-
-```sh
+# 3. configure Daybreak
+cp config.example.yml config.yml
 cp .env.example .env
-```
 
-Daybreak loads `.env` from the current working directory at startup. The local `.env` is ignored by
-Git and must not be committed. Run Daybreak from the project directory when relying on this file.
-
-GitHub and GitLab credentials are managed by `gh` and `glab` respectively. Do not add their tokens
-to Daybreak's `.env`; authenticate the CLIs directly with `gh auth login` and `glab auth login`.
-
-GitHub notifications and GitLab todos are collected as global provider feeds. Repository metrics,
-authored work, assigned work, and review requests are restricted to the GitHub repositories and
-GitLab projects explicitly listed in configuration.
-
-Validate configuration and authentication:
-
-```sh
+# 4. check everything works
 deno task config:check
 deno task doctor
-```
 
-Fetch all enabled sections:
-
-```sh
-deno task fetch --pretty
-```
-
-Fetch selected sections without changing metric history:
-
-```sh
-deno task fetch --section weather,github --pretty --no-write-state
-```
-
-`stdout` contains the JSON result. Diagnostics from third-party CLIs are captured and do not corrupt
-the output.
-
-## Agent Format
-
-`--format agent` emits a compact, flat projection of the same run, intended for a language model
-that writes the prose instead of the deterministic renderer:
-
-```sh
-deno task agent --pretty
-deno task agent --max-items 8      # tighter, for a small local model
-```
-
-The default `json` format is a faithful dump of every upstream response and runs to roughly 180 KB,
-most of it avatar URLs, project descriptions and long-tail backlog items. The agent projection is
-about 7 KB at the default cap and 4 KB at `--max-items 5`.
-
-The shape is built for a small, locally hosted model with a short context window that reasons poorly
-over deep JSON, so it does the judging up front:
-
-- **One flat `work` array** replaces five nested per-project buckets. Each entry carries `priority`,
-  `source`, `kind`, `ref`, `title`, `url` and `why`.
-- **Ranking is already applied.** Priority 1 is blocked or failing, 2 is waiting on you, 3 is in
-  flight. Within a priority, reviews and your own merge requests outrank inbox-style todos. The
-  narrator can read the array in order instead of judging urgency.
-- **Reasons are pre-phrased in English.** `pipeline_failed` arrives as `"pipeline failed"`, and
-  approvers are named, so no reason code has to be interpreted.
-- **Every list is capped** by `--max-items` with an explicit `workOmitted` or `itemsOmitted` count,
-  so a busy day cannot overflow the context window.
-- **Filters and deduplication are applied**, and the counts of what was removed are reported so the
-  narrator can say "the rest was newsletters" truthfully without being handed the newsletters.
-- **Section health** is summarised under `health.collected` and `health.problems`.
-- **Weather carries an intraday arc**, sampled at 06:00, 09:00, 12:00, 15:00, 18:00 and 21:00 local
-  time, plus tomorrow's outlook, so the narrator can describe the shape of the day rather than only
-  its high and low.
-
-The projection is lossy by design. Use the default format when you need the complete record.
-
-## Filters
-
-Mail and GitLab todos carry a lot of recurring noise. The optional `filters` block removes it for
-both the Telegram renderer and the agent format:
-
-```yaml
-filters:
-  mail_ignore_categories:
-    - promotions
-    - social
-  mail_ignore_senders:
-    - noreply@newsletter.example
-  todo_ignore_titles:
-    - Community contributions report
-```
-
-`mail_ignore_categories` matches Gmail's `CATEGORY_*` labels and defaults to promotions and social.
-The other two lists default to empty and match case-insensitive substrings. Gmail's own `IMPORTANT`
-flag is deliberately not used to select mail, because it fires on a large share of newsletters; a
-read message reaches the brief only when its subject suggests a pending decision.
-
-## Weekly Recap
-
-Set `gitlab.recap` to collect merge requests you merged and issues you closed inside a lookback
-window, alongside the open work:
-
-```yaml
-gitlab:
-  recap: 7d
-```
-
-Omit the key to skip the extra API calls.
-
-## Telegram Delivery
-
-Create a bot through Telegram's `@BotFather`, then start a chat with the bot. Telegram bots cannot
-initiate a private conversation until the recipient has contacted the bot.
-
-Store the bot token in the project-local `.env`, outside `config.yml`:
-
-```dotenv
-TELEGRAM_BOT_TOKEN=123456:replace-with-your-token
-```
-
-Find the numeric destination chat ID after sending a message to the bot:
-
-```sh
-deno task telegram:chats
-```
-
-This lists only chat IDs, types, and display names. Use the intended chat's `id` value in
-`config.yml`:
-
-Do not use the bot's own numeric user ID. The destination ID must come from a message sent by your
-personal account, group, or channel to the bot.
-
-```yaml
-telegram:
-  enabled: true
-  chat_id: 123456789
-  disable_link_previews: true
-```
-
-Validate the token and destination without sending a brief:
-
-```sh
-deno task doctor
-```
-
-Preview the deterministic Telegram text locally:
-
-```sh
+# 5. see your brief
 deno task deliver --dry-run
 ```
 
-Fetch, render, and send the brief:
+Google accounts need one extra step each — a separate `gws` profile per account — described in
+[Google authentication](usage.md#google-authentication).
 
-```sh
-deno task deliver
-```
+Once it looks right, `deno task deliver` sends it to Telegram, and `deno task compile` produces a
+standalone binary suitable for a scheduled job.
 
-Long briefs are split at paragraph boundaries to stay below Telegram's message-size limit. The
-current renderer is deterministic. A local email summarizer can later replace only the email
-selection and prose stage without changing Telegram delivery.
+## Documentation
 
-## Native Binary
+The [usage guide](usage.md) covers the rest:
 
-```sh
-mkdir -p dist
-deno task compile
-./dist/daybreak fetch --pretty
-```
-
-The compiled binary still requires enabled third-party CLIs to be installed and authenticated.
-
-All commands automatically use `./config.yml` when `--config` is omitted. Use `--config PATH` when
-running from another directory or selecting a different configuration file.
-
-## Exit Codes
-
-- `0`: command succeeded
-- `1`: invalid arguments or configuration
-- `2`: preflight dependency or authentication failure
-- `3`: fetch completed but one or more collectors failed
-
-## Merge Request Detail
-
-GitLab's merge request list endpoint omits `head_pipeline` and reports `detailed_merge_status` as
-`unchecked`. Pipeline status, real merge status and approvals are therefore fetched per merge
-request, for the ones that reach the brief only, capped at 25 per project.
-
-## State
-
-GitHub and GitLab metric snapshots are stored in SQLite. A delta compares the current value to the
-latest snapshot at or before the configured lookback boundary. The first run therefore reports
-`null` deltas.
-
-Use `--no-write-state` for previews and diagnostics.
+|                                                                     |                                                                |
+| ------------------------------------------------------------------- | -------------------------------------------------------------- |
+| [Installing the dependencies](usage.md#installing-the-dependencies) | Requirements and one-time setup                                |
+| [Google authentication](usage.md#google-authentication)             | One `gws` profile per Google account                           |
+| [Configuration](usage.md#configuration)                             | `config.yml`, `.env`, and what is global vs. explicitly listed |
+| [Commands and options](usage.md#commands-and-options)               | Every command and flag                                         |
+| [Output formats](usage.md#output-formats)                           | `json` vs `agent`, and why the agent format exists             |
+| [Output examples](usage.md#output-examples)                         | Real, redacted output for every command                        |
+| [Filtering out the noise](usage.md#filtering-out-the-noise)         | Suppressing newsletters and recurring todos                    |
+| [Telegram delivery](usage.md#telegram-delivery)                     | Bot setup and sending                                          |
+| [Metric history and state](usage.md#metric-history-and-state)       | How star and download deltas work                              |
+| [Troubleshooting](usage.md#troubleshooting)                         | Expired Google tokens, missing `.env`, null deltas             |
 
 ## Development
 
-Run the native TypeScript linter with Deno's recommended rules:
-
 ```sh
-deno task lint
+deno task check   # formatting, linting, type checking and tests
 ```
 
-Apply safe automatic lint fixes:
-
-```sh
-deno task lint:fix
-```
-
-Run formatting checks, linting, type checking, and tests together:
-
-```sh
-deno task check
-```
-
-Daybreak uses `deno lint` instead of the deprecated TSLint package. The lint configuration is kept
-in `deno.json` and currently enables Deno's recommended rule set.
+See [Development](usage.md#development) for the individual tasks.
